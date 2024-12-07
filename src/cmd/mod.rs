@@ -18,9 +18,9 @@ pub use unknown::Unknown;
 
 use crate::{Connection, Db, Frame, Parse, ParseError, Shutdown};
 
-/// Enumeration of supported Redis commands.
+/// 支持的 Redis 命令的枚举。
 ///
-/// Methods called on `Command` are delegated to the command implementation.
+/// 对 `Command` 调用的方法会委托到具体的命令实现。
 #[derive(Debug)]
 pub enum Command {
     Get(Get),
@@ -33,29 +33,23 @@ pub enum Command {
 }
 
 impl Command {
-    /// Parse a command from a received frame.
+    /// 从接收到的帧中解析出一个命令。
     ///
-    /// The `Frame` must represent a Redis command supported by `mini-redis` and
-    /// be the array variant.
+    /// `Frame` 必须表示 `mini-redis` 支持的 Redis 命令，并且是数组变体。
     ///
-    /// # Returns
+    /// # 返回
     ///
-    /// On success, the command value is returned, otherwise, `Err` is returned.
+    /// 成功时返回命令值，否则返回 `Err`。
     pub fn from_frame(frame: Frame) -> crate::Result<Command> {
-        // The frame value is decorated with `Parse`. `Parse` provides a
-        // "cursor" like API which makes parsing the command easier.
+        // 为帧值加上 `Parse` 装饰。`Parse` 提供了一个类似“光标”的 API，使得解析命令更简单。
         //
-        // The frame value must be an array variant. Any other frame variants
-        // result in an error being returned.
+        // 帧值必须是数组变体。任何其他帧变体都会导致返回错误。
         let mut parse = Parse::new(frame)?;
 
-        // All redis commands begin with the command name as a string. The name
-        // is read and converted to lower cases in order to do case sensitive
-        // matching.
+        // 所有的 redis 命令都以命令名称作为字符串开头。名称被读取并转换为小写以进行大小写敏感的匹配。
         let command_name = parse.next_string()?.to_lowercase();
 
-        // Match the command name, delegating the rest of the parsing to the
-        // specific command.
+        // 匹配命令名称，将其余的解析任务委派给具体的命令。
         let command = match &command_name[..] {
             "get" => Command::Get(Get::parse_frames(&mut parse)?),
             "publish" => Command::Publish(Publish::parse_frames(&mut parse)?),
@@ -64,29 +58,24 @@ impl Command {
             "unsubscribe" => Command::Unsubscribe(Unsubscribe::parse_frames(&mut parse)?),
             "ping" => Command::Ping(Ping::parse_frames(&mut parse)?),
             _ => {
-                // The command is not recognized and an Unknown command is
-                // returned.
+                // 命令不被识别，返回一个 Unknown 命令。
                 //
-                // `return` is called here to skip the `finish()` call below. As
-                // the command is not recognized, there is most likely
-                // unconsumed fields remaining in the `Parse` instance.
+                // 这里调用 `return` 以跳过下面的 `finish()` 调用。
+                // 因为命令不被识别，`Parse` 实例中很可能还有未消费的字段。
                 return Ok(Command::Unknown(Unknown::new(command_name)));
             }
         };
 
-        // Check if there is any remaining unconsumed fields in the `Parse`
-        // value. If fields remain, this indicates an unexpected frame format
-        // and an error is returned.
+        // 检查 `Parse` 值中是否还有未消费的字段。如果有字段未消费，表明帧格式不符合预期，将返回错误。
         parse.finish()?;
 
-        // The command has been successfully parsed
+        // 命令已成功解析
         Ok(command)
     }
 
-    /// Apply the command to the specified `Db` instance.
+    /// 将命令应用到指定的 `Db` 实例。
     ///
-    /// The response is written to `dst`. This is called by the server in order
-    /// to execute a received command.
+    /// 响应写入到 `dst`。服务器调用此函数以执行接收到的命令。
     pub(crate) async fn apply(
         self,
         db: &Db,
@@ -102,13 +91,12 @@ impl Command {
             Subscribe(cmd) => cmd.apply(db, dst, shutdown).await,
             Ping(cmd) => cmd.apply(dst).await,
             Unknown(cmd) => cmd.apply(dst).await,
-            // `Unsubscribe` cannot be applied. It may only be received from the
-            // context of a `Subscribe` command.
+            // `Unsubscribe` 不能被应用。它只能在 `Subscribe` 命令的上下文中接收。
             Unsubscribe(_) => Err("`Unsubscribe` is unsupported in this context".into()),
         }
     }
 
-    /// Returns the command name
+    /// 返回命令名称
     pub(crate) fn get_name(&self) -> &str {
         match self {
             Command::Get(_) => "get",

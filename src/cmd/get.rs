@@ -3,87 +3,79 @@ use crate::{Connection, Db, Frame, Parse};
 use bytes::Bytes;
 use tracing::{debug, instrument};
 
-/// Get the value of key.
+/// 获取键的值。
 ///
-/// If the key does not exist the special value nil is returned. An error is
-/// returned if the value stored at key is not a string, because GET only
-/// handles string values.
+/// 如果键不存在，则返回特殊值 nil。如果存储在键处的值不是字符串，则返回错误，因为 GET 只处理字符串值。
 #[derive(Debug)]
 pub struct Get {
-    /// Name of the key to get
+    /// 要获取的键名
     key: String,
 }
 
 impl Get {
-    /// Create a new `Get` command which fetches `key`.
+    /// 创建一个新的 `Get` 命令以获取 `key`。
     pub fn new(key: impl ToString) -> Get {
         Get {
             key: key.to_string(),
         }
     }
 
-    /// Get the key
+    /// 获取键名
     pub fn key(&self) -> &str {
         &self.key
     }
 
-    /// Parse a `Get` instance from a received frame.
+    /// 从接收到的帧中解析一个 `Get` 实例。
     ///
-    /// The `Parse` argument provides a cursor-like API to read fields from the
-    /// `Frame`. At this point, the entire frame has already been received from
-    /// the socket.
+    /// `Parse` 参数提供了一个类似光标的 API，用于从 `Frame` 中读取字段。
+    /// 此时，整个帧已经从套接字接收到。
     ///
-    /// The `GET` string has already been consumed.
+    /// `GET` 字符串已经被解析消耗。
     ///
-    /// # Returns
+    /// # 返回
     ///
-    /// Returns the `Get` value on success. If the frame is malformed, `Err` is
-    /// returned.
+    /// 成功时返回 `Get` 值。如果帧格式错误，则返回 `Err`。
     ///
-    /// # Format
+    /// # 格式
     ///
-    /// Expects an array frame containing two entries.
+    /// 期望一个包含两个条目的数组帧。
     ///
     /// ```text
     /// GET key
     /// ```
     pub(crate) fn parse_frames(parse: &mut Parse) -> crate::Result<Get> {
-        // The `GET` string has already been consumed. The next value is the
-        // name of the key to get. If the next value is not a string or the
-        // input is fully consumed, then an error is returned.
+        // `GET` 字符串已经被解析消耗。下一个值是要获取的键名。
+        // 如果下一个值不是字符串或输入已完全消耗，则返回错误。
         let key = parse.next_string()?;
 
         Ok(Get { key })
     }
 
-    /// Apply the `Get` command to the specified `Db` instance.
+    /// 将 `Get` 命令应用到指定的 `Db` 实例。
     ///
-    /// The response is written to `dst`. This is called by the server in order
-    /// to execute a received command.
+    /// 响应写入到 `dst`。服务器调用此函数以执行接收到的命令。
     #[instrument(skip(self, db, dst))]
     pub(crate) async fn apply(self, db: &Db, dst: &mut Connection) -> crate::Result<()> {
-        // Get the value from the shared database state
+        // 从共享数据库状态获取值
         let response = if let Some(value) = db.get(&self.key) {
-            // If a value is present, it is written to the client in "bulk"
-            // format.
+            // 如果存在值，以 "bulk" 格式写入客户端。
             Frame::Bulk(value)
         } else {
-            // If there is no value, `Null` is written.
+            // 如果没有值，写入 `Null`。
             Frame::Null
         };
 
         debug!(?response);
 
-        // Write the response back to the client
+        // 将响应写回客户端
         dst.write_frame(&response).await?;
 
         Ok(())
     }
 
-    /// Converts the command into an equivalent `Frame`.
+    /// 将命令转换为等效的 `Frame`。
     ///
-    /// This is called by the client when encoding a `Get` command to send to
-    /// the server.
+    /// 客户端在编码一个 `Get` 命令以发送到服务器时调用此函数。
     pub(crate) fn into_frame(self) -> Frame {
         let mut frame = Frame::array();
         frame.push_bulk(Bytes::from("get".as_bytes()));
