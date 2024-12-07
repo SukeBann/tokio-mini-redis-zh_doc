@@ -1,6 +1,6 @@
-//! Minimal blocking Redis client implementation
+//! 最小阻塞 Redis 客户端实现
 //!
-//! Provides a blocking connect and methods for issuing the supported commands.
+//! 提供阻塞的连接和执行支持命令的方法。
 
 use bytes::Bytes;
 use std::time::Duration;
@@ -9,55 +9,49 @@ use tokio::runtime::Runtime;
 
 pub use crate::clients::Message;
 
-/// Established connection with a Redis server.
+/// 与 Redis 服务器建立的连接。
 ///
-/// Backed by a single `TcpStream`, `BlockingClient` provides basic network
-/// client functionality (no pooling, retrying, ...). Connections are
-/// established using the [`connect`](fn@connect) function.
+/// 基于单个 `TcpStream`，`BlockingClient` 提供基本的网络客户端功能
+/// （没有连接池、重试等）。使用 [`connect`](fn@connect) 函数建立连接。
 ///
-/// Requests are issued using the various methods of `Client`.
+/// 使用 `Client` 的各种方法发出请求。
 pub struct BlockingClient {
-    /// The asynchronous `Client`.
+    /// 异步 `Client`。
     inner: crate::clients::Client,
 
-    /// A `current_thread` runtime for executing operations on the asynchronous
-    /// client in a blocking manner.
+    /// 一个 `current_thread` 运行时，用于以阻塞方式在异步客户端上执行操作。
     rt: Runtime,
 }
 
-/// A client that has entered pub/sub mode.
+/// 进入发布/订阅模式的客户端。
 ///
-/// Once clients subscribe to a channel, they may only perform pub/sub related
-/// commands. The `BlockingClient` type is transitioned to a
-/// `BlockingSubscriber` type in order to prevent non-pub/sub methods from being
-/// called.
+/// 一旦客户端订阅了一个频道，它们可能只能执行与发布/订阅相关的命令。
+/// `BlockingClient` 类型转换为 `BlockingSubscriber` 类型，
+/// 以防止调用非发布/订阅的方法。
 pub struct BlockingSubscriber {
-    /// The asynchronous `Subscriber`.
+    /// 异步 `Subscriber`。
     inner: crate::clients::Subscriber,
 
-    /// A `current_thread` runtime for executing operations on the asynchronous
-    /// `Subscriber` in a blocking manner.
+    /// 一个 `current_thread` 运行时，用于以阻塞方式在异步 `Subscriber` 上执行操作。
     rt: Runtime,
 }
 
-/// The iterator returned by `Subscriber::into_iter`.
+/// `Subscriber::into_iter` 返回的迭代器。
 struct SubscriberIterator {
-    /// The asynchronous `Subscriber`.
+    /// 异步 `Subscriber`。
     inner: crate::clients::Subscriber,
 
-    /// A `current_thread` runtime for executing operations on the asynchronous
-    /// `Subscriber` in a blocking manner.
+    /// 一个 `current_thread` 运行时，用于以阻塞方式在异步 `Subscriber` 上执行操作。
     rt: Runtime,
 }
 
 impl BlockingClient {
-    /// Establish a connection with the Redis server located at `addr`.
+    /// 与位于 `addr` 的 Redis 服务器建立连接。
     ///
-    /// `addr` may be any type that can be asynchronously converted to a
-    /// `SocketAddr`. This includes `SocketAddr` and strings. The `ToSocketAddrs`
-    /// trait is the Tokio version and not the `std` version.
+    /// `addr` 可以是任何可以异步转换为 `SocketAddr` 的类型。这包括 `SocketAddr` 和字符串。
+    /// `ToSocketAddrs` 是 Tokio 版本，而不是 `std` 版本。
     ///
-    /// # Examples
+    /// # 示例
     ///
     /// ```no_run
     /// use mini_redis::clients::BlockingClient;
@@ -80,13 +74,13 @@ impl BlockingClient {
         Ok(BlockingClient { inner, rt })
     }
 
-    /// Get the value of key.
+    /// 获取键的值。
     ///
-    /// If the key does not exist the special value `None` is returned.
+    /// 如果键不存在，则返回特殊值 `None`。
     ///
-    /// # Examples
+    /// # 示例
     ///
-    /// Demonstrates basic usage.
+    /// 展示基本的用法。
     ///
     /// ```no_run
     /// use mini_redis::clients::BlockingClient;
@@ -101,18 +95,16 @@ impl BlockingClient {
     pub fn get(&mut self, key: &str) -> crate::Result<Option<Bytes>> {
         self.rt.block_on(self.inner.get(key))
     }
-
-    /// Set `key` to hold the given `value`.
+    /// 将给定的 `value` 设置为与 `key` 关联。
     ///
-    /// The `value` is associated with `key` until it is overwritten by the next
-    /// call to `set` or it is removed.
+    /// `value` 与 `key` 关联，直到下一次调用 `set` 或它被删除时覆盖。
     ///
-    /// If key already holds a value, it is overwritten. Any previous time to
-    /// live associated with the key is discarded on successful SET operation.
+    /// 如果键已经有一个值，它将被覆盖。任何与该键相关联的先前的存活时间
+    /// 在成功的 SET 操作时将被丢弃。
     ///
-    /// # Examples
+    /// # 示例
     ///
-    /// Demonstrates basic usage.
+    /// 展示基本的用法。
     ///
     /// ```no_run
     /// use mini_redis::clients::BlockingClient;
@@ -122,7 +114,7 @@ impl BlockingClient {
     ///
     ///     client.set("foo", "bar".into()).unwrap();
     ///
-    ///     // Getting the value immediately works
+    ///     // 立即获取值是可行的
     ///     let val = client.get("foo").unwrap().unwrap();
     ///     assert_eq!(val, "bar");
     /// }
@@ -131,22 +123,20 @@ impl BlockingClient {
         self.rt.block_on(self.inner.set(key, value))
     }
 
-    /// Set `key` to hold the given `value`. The value expires after `expiration`
+    /// 将给定的 `value` 设置为与 `key` 关联，该值将在 `expiration` 后过期。
     ///
-    /// The `value` is associated with `key` until one of the following:
-    /// - it expires.
-    /// - it is overwritten by the next call to `set`.
-    /// - it is removed.
+    /// `value` 与 `key` 关联，直到以下之一发生：
+    /// - 它过期。
+    /// - 它被下一次调用 `set` 覆盖。
+    /// - 它被删除。
     ///
-    /// If key already holds a value, it is overwritten. Any previous time to
-    /// live associated with the key is discarded on a successful SET operation.
+    /// 如果键已经有一个值，它将被覆盖。任何与该键相关联的先前的存活时间
+    /// 在成功的 SET 操作时将被丢弃。
     ///
-    /// # Examples
+    /// # 示例
     ///
-    /// Demonstrates basic usage. This example is not **guaranteed** to always
-    /// work as it relies on time based logic and assumes the client and server
-    /// stay relatively synchronized in time. The real world tends to not be so
-    /// favorable.
+    /// 展示基本用法。这个例子不**保证**总是有效，因为它依赖于基于时间的逻辑，
+    /// 并假设客户端和服务器在时间上保持相对同步。现实世界往往不那么有利。
     ///
     /// ```no_run
     /// use mini_redis::clients::BlockingClient;
@@ -159,11 +149,11 @@ impl BlockingClient {
     ///
     ///     client.set_expires("foo", "bar".into(), ttl).unwrap();
     ///
-    ///     // Getting the value immediately works
+    ///     // 立即获取值是可行的
     ///     let val = client.get("foo").unwrap().unwrap();
     ///     assert_eq!(val, "bar");
     ///
-    ///     // Wait for the TTL to expire
+    ///     // 等待 TTL 到期
     ///     thread::sleep(ttl);
     ///
     ///     let val = client.get("foo").unwrap();
@@ -180,15 +170,13 @@ impl BlockingClient {
             .block_on(self.inner.set_expires(key, value, expiration))
     }
 
-    /// Posts `message` to the given `channel`.
+    /// 发布 `message` 到指定的 `channel`。
     ///
-    /// Returns the number of subscribers currently listening on the channel.
-    /// There is no guarantee that these subscribers receive the message as they
-    /// may disconnect at any time.
+    /// 返回当前在频道上监听的订阅者数量。不能保证这些订阅者会接收到消息，因为他们可能随时断开连接。
     ///
-    /// # Examples
+    /// # 示例
     ///
-    /// Demonstrates basic usage.
+    /// 展示基本用法。
     ///
     /// ```no_run
     /// use mini_redis::clients::BlockingClient;
@@ -204,14 +192,12 @@ impl BlockingClient {
         self.rt.block_on(self.inner.publish(channel, message))
     }
 
-    /// Subscribes the client to the specified channels.
+    /// 订阅客户端到指定的频道。
     ///
-    /// Once a client issues a subscribe command, it may no longer issue any
-    /// non-pub/sub commands. The function consumes `self` and returns a
-    /// `BlockingSubscriber`.
+    /// 一旦客户端发出订阅命令，它不能再发出任何非发布/订阅命令。该函数消耗 `self` 并返回一个
+    /// `BlockingSubscriber`。
     ///
-    /// The `BlockingSubscriber` value is used to receive messages as well as
-    /// manage the list of channels the client is subscribed to.
+    /// `BlockingSubscriber` 值用于接收消息，以及管理客户端所订阅的频道列表。
     pub fn subscribe(self, channels: Vec<String>) -> crate::Result<BlockingSubscriber> {
         let subscriber = self.rt.block_on(self.inner.subscribe(channels))?;
         Ok(BlockingSubscriber {
@@ -222,21 +208,19 @@ impl BlockingClient {
 }
 
 impl BlockingSubscriber {
-    /// Returns the set of channels currently subscribed to.
+    /// 返回当前订阅的频道集合。
     pub fn get_subscribed(&self) -> &[String] {
         self.inner.get_subscribed()
     }
 
-    /// Receive the next message published on a subscribed channel, waiting if
-    /// necessary.
+    /// 接收订阅的频道上发布的下一条消息，如有必要，等待。
     ///
-    /// `None` indicates the subscription has been terminated.
+    /// `None` 表示订阅已终止。
     pub fn next_message(&mut self) -> crate::Result<Option<Message>> {
         self.rt.block_on(self.inner.next_message())
     }
 
-    /// Convert the subscriber into an `Iterator` yielding new messages published
-    /// on subscribed channels.
+    /// 将订阅者转换为一个 `Iterator`，提供在已订阅频道上发布的新消息。
     pub fn into_iter(self) -> impl Iterator<Item = crate::Result<Message>> {
         SubscriberIterator {
             inner: self.inner,
@@ -244,12 +228,12 @@ impl BlockingSubscriber {
         }
     }
 
-    /// Subscribe to a list of new channels
+    /// 订阅一个新的频道列表
     pub fn subscribe(&mut self, channels: &[String]) -> crate::Result<()> {
         self.rt.block_on(self.inner.subscribe(channels))
     }
 
-    /// Unsubscribe to a list of new channels
+    /// 取消订阅一个新的频道列表
     pub fn unsubscribe(&mut self, channels: &[String]) -> crate::Result<()> {
         self.rt.block_on(self.inner.unsubscribe(channels))
     }

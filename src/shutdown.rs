@@ -1,25 +1,21 @@
 use tokio::sync::broadcast;
 
-/// Listens for the server shutdown signal.
+/// 监听服务器关闭信号。
 ///
-/// Shutdown is signalled using a `broadcast::Receiver`. Only a single value is
-/// ever sent. Once a value has been sent via the broadcast channel, the server
-/// should shutdown.
+/// 使用 `broadcast::Receiver` 来发出关闭信号。该信号仅发送一个值。一旦通过广播通道发送了一个值，服务器应该关闭。
 ///
-/// The `Shutdown` struct listens for the signal and tracks that the signal has
-/// been received. Callers may query for whether the shutdown signal has been
-/// received or not.
+/// `Shutdown` 结构体监听信号并跟踪信号是否已接收。调用方可以查询关闭信号是否已接收到。
 #[derive(Debug)]
 pub(crate) struct Shutdown {
-    /// `true` if the shutdown signal has been received
+    /// 如果关闭信号已接收到，则为 `true`
     is_shutdown: bool,
 
-    /// The receive half of the channel used to listen for shutdown.
+    /// 用于监听关闭的通道接收部分。
     notify: broadcast::Receiver<()>,
 }
 
 impl Shutdown {
-    /// Create a new `Shutdown` backed by the given `broadcast::Receiver`.
+    /// 使用给定的 `broadcast::Receiver` 创建一个新的 `Shutdown`。
     pub(crate) fn new(notify: broadcast::Receiver<()>) -> Shutdown {
         Shutdown {
             is_shutdown: false,
@@ -27,23 +23,22 @@ impl Shutdown {
         }
     }
 
-    /// Returns `true` if the shutdown signal has been received.
+    /// 如果关闭信号已经被接收，则返回 `true`。
     pub(crate) fn is_shutdown(&self) -> bool {
         self.is_shutdown
     }
 
-    /// Receive the shutdown notice, waiting if necessary.
+    /// 接收关闭通知，必要时会等待。
     pub(crate) async fn recv(&mut self) {
-        // If the shutdown signal has already been received, then return
-        // immediately.
+        // 如果关闭信号已接收，则立即返回。
         if self.is_shutdown {
             return;
         }
 
-        // Cannot receive a "lag error" as only one value is ever sent.
+        // 不会收到“滞后错误”，因为只发送了一个值。
         let _ = self.notify.recv().await;
 
-        // Remember that the signal has been received.
+        // 记住信号已被接收。
         self.is_shutdown = true;
     }
 }

@@ -5,39 +5,33 @@ use bytes::Bytes;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::oneshot;
 
-// Enum used to message pass the requested command from the `BufferedClient` handle
+// 枚举用于从 `BufferedClient` 句柄传递请求的命令
 #[derive(Debug)]
 enum Command {
     Get(String),
     Set(String, Bytes),
 }
 
-// Message type sent over the channel to the connection task.
+// 通过通道发送到连接任务的消息类型。
 //
-// `Command` is the command to forward to the connection.
+// `Command` 是要转发到连接的命令。
 //
-// `oneshot::Sender` is a channel type that sends a **single** value. It is used
-// here to send the response received from the connection back to the original
-// requester.
+// `oneshot::Sender` 是一种通道类型，用于发送**单个**值。这里用于将从连接接收到的响应发送回原始请求者。
 type Message = (Command, oneshot::Sender<Result<Option<Bytes>>>);
 
-/// Receive commands sent through the channel and forward them to client. The
-/// response is returned back to the caller via a `oneshot`.
+/// 接收通过通道发送的命令并将其转发给客户端。响应通过 `oneshot` 返回给调用者。
 async fn run(mut client: Client, mut rx: Receiver<Message>) {
-    // Repeatedly pop messages from the channel. A return value of `None`
-    // indicates that all `BufferedClient` handles have dropped and there will never be
-    // another message sent on the channel.
+    // 重复地从通道中弹出消息。返回值为 `None` 表示所有 `BufferedClient` 句柄已丢弃，通道中将不再有其他消息发送。
     while let Some((cmd, tx)) = rx.recv().await {
-        // The command is forwarded to the connection
+        // 将命令转发到连接
         let response = match cmd {
             Command::Get(key) => client.get(&key).await,
             Command::Set(key, value) => client.set(&key, value).await.map(|_| None),
         };
 
-        // Send the response back to the caller.
+        // 将响应发送回调用者。
         //
-        // Failing to send the message indicates the `rx` half dropped
-        // before receiving the message. This is a normal runtime event.
+        // 未能发送消息表示 `rx` 半部分在接收消息之前就被丢弃。这是一个正常的运行时事件。
         let _ = tx.send(response);
     }
 }
@@ -48,70 +42,61 @@ pub struct BufferedClient {
 }
 
 impl BufferedClient {
-    /// Create a new client request buffer
+    /// 创建一个新的客户端请求缓冲区
     ///
-    /// The `Client` performs Redis commands directly on the TCP connection. Only a
-    /// single request may be in-flight at a given time and operations require
-    /// mutable access to the `Client` handle. This prevents using a single Redis
-    /// connection from multiple Tokio tasks.
+    /// `Client` 直接在 TCP 连接上执行 Redis 命令。给定时间内只能有一个请求在处理中，并且操作需要对 `Client` 句柄的可变访问。
+    /// 这防止了在多个 Tokio 任务中使用单个 Redis 连接。
     ///
-    /// The strategy for dealing with this class of problem is to spawn a dedicated
-    /// Tokio task to manage the Redis connection and using "message passing" to
-    /// operate on the connection. Commands are pushed into a channel. The
-    /// connection task pops commands off of the channel and applies them to the
-    /// Redis connection. When the response is received, it is forwarded to the
-    /// original requester.
+    /// 解决此类问题的策略是生成一个专用的 Tokio 任务来管理 Redis 连接，并使用“消息传递”来操作连接。
+    /// 命令被推送到通道中。连接任务从通道中弹出命令并将其应用于 Redis 连接。
+    /// 当收到响应时，它会被转发给原始请求者。
     ///
-    /// The returned `BufferedClient` handle may be cloned before passing the new handle to
-    /// separate tasks.
+    /// 在将新的句柄传递给其他任务之前，可以克隆返回的 `BufferedClient` 句柄。
     pub fn buffer(client: Client) -> BufferedClient {
-        // Setting the message limit to a hard coded value of 32. in a real-app, the
-        // buffer size should be configurable, but we don't need to do that here.
+        // 将消息限制设置为硬编码值 32。在真实应用中，缓冲区大小应可配置，但这里无需这样做。
         let (tx, rx) = channel(32);
 
-        // Spawn a task to process requests for the connection.
+        // 生成一个任务来处理连接的请求。
         tokio::spawn(async move { run(client, rx).await });
 
-        // Return the `BufferedClient` handle.
+        // 返回 `BufferedClient` 句柄。
         BufferedClient { tx }
     }
 
-    /// Get the value of a key.
+    /// 获取键的值。
     ///
-    /// Same as `Client::get` but requests are **buffered** until the associated
-    /// connection has the ability to send the request.
+    /// 与 `Client::get` 相同，但请求是**缓冲的**，直到相关的连接能够发送请求。
     pub async fn get(&mut self, key: &str) -> Result<Option<Bytes>> {
-        // Initialize a new `Get` command to send via the channel.
+        // 初始化一个新的 `Get` 命令，通过通道发送。
         let get = Command::Get(key.into());
 
-        // Initialize a new oneshot to be used to receive the response back from the connection.
+        // 初始化一个新的 oneshot，用于接收从连接返回的响应。
         let (tx, rx) = oneshot::channel();
 
-        // Send the request
+        // 发送请求
         self.tx.send((get, tx)).await?;
 
-        // Await the response
+        // 等待响应
         match rx.await {
             Ok(res) => res,
             Err(err) => Err(err.into()),
         }
     }
 
-    /// Set `key` to hold the given `value`.
+    /// 设置 `key` 以保存给定的 `value`。
     ///
-    /// Same as `Client::set` but requests are **buffered** until the associated
-    /// connection has the ability to send the request
+    /// 与 `Client::set` 相同，但请求是**缓冲的**，直到相关的连接能够发送请求
     pub async fn set(&mut self, key: &str, value: Bytes) -> Result<()> {
-        // Initialize a new `Set` command to send via the channel.
+        // 初始化一个新的 `Set` 命令，通过通道发送。
         let set = Command::Set(key.into(), value);
 
-        // Initialize a new oneshot to be used to receive the response back from the connection.
+        // 初始化一个新的 oneshot，用于接收从连接返回的响应。
         let (tx, rx) = oneshot::channel();
 
-        // Send the request
+        // 发送请求
         self.tx.send((set, tx)).await?;
 
-        // Await the response
+        // 等待响应
         match rx.await {
             Ok(res) => res.map(|_| ()),
             Err(err) => Err(err.into()),

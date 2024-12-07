@@ -1,29 +1,26 @@
-//! mini-redis server.
+//! mini-redis 服务器。
 //!
-//! This file is the entry point for the server implemented in the library. It
-//! performs command line parsing and passes the arguments on to
-//! `mini_redis::server`.
+//! 这个文件是该库中实现的服务器的入口点。
+//! 它执行命令行解析，并将参数传递给 `mini_redis::server`。
 //!
-//! The `clap` crate is used for parsing arguments.
+//! `clap` 库用于解析参数。use mini_redis::{server, DEFAULT_PORT};
 
 use mini_redis::{server, DEFAULT_PORT};
-
 use clap::Parser;
 use tokio::net::TcpListener;
 use tokio::signal;
 
 #[cfg(feature = "otel")]
-// To be able to set the XrayPropagator
+// 为了能够设置 XrayPropagator
 use opentelemetry::global;
 #[cfg(feature = "otel")]
-// To configure certain options such as sampling rate
+// 用于配置某些选项，例如采样率
 use opentelemetry::sdk::trace as sdktrace;
 #[cfg(feature = "otel")]
-// For passing along the same XrayId across services
+// 用于跨服务传递相同的 XrayId
 use opentelemetry_aws::trace::XrayPropagator;
 #[cfg(feature = "otel")]
-// The `Ext` traits are to allow the Registry to accept the
-// OpenTelemetry-specific types (such as `OpenTelemetryLayer`)
+// `Ext` 特性用于使注册表接受 OpenTelemetry 特定类型（例如 `OpenTelemetryLayer`）
 use tracing_subscriber::{
     fmt, layer::SubscriberExt, util::SubscriberInitExt, util::TryInitError, EnvFilter,
 };
@@ -58,10 +55,10 @@ fn set_up_logging() -> mini_redis::Result<()> {
 
 #[cfg(feature = "otel")]
 fn set_up_logging() -> Result<(), TryInitError> {
-    // Set the global propagator to X-Ray propagator
-    // Note: If you need to pass the x-amzn-trace-id across services in the same trace,
-    // you will need this line. However, this requires additional code not pictured here.
-    // For a full example using hyper, see:
+    // 将全局传播器设置为 X-Ray 传播器
+    // 注意：如果您需要在同一个追踪中跨服务传递 x-amzn-trace-id，
+    // 您将需要这行代码。但是，这需要额外的代码，这里没有展示。
+    // 有关使用 hyper 的完整示例，请参见：
     // https://github.com/open-telemetry/opentelemetry-rust/blob/v0.19.0/examples/aws-xray/src/server.rs#L14-L26
     global::set_text_map_propagator(XrayPropagator::default());
 
@@ -77,15 +74,13 @@ fn set_up_logging() -> Result<(), TryInitError> {
         .install_simple()
         .expect("Unable to initialize OtlpPipeline");
 
-    // Create a tracing layer with the configured tracer
+    // 使用配置的追踪器创建一个跟踪层
     let opentelemetry = tracing_opentelemetry::layer().with_tracer(tracer);
 
-    // Parse an `EnvFilter` configuration from the `RUST_LOG`
-    // environment variable.
+    // 从 `RUST_LOG` 环境变量解析 `EnvFilter` 配置。
     let filter = EnvFilter::from_default_env();
 
-    // Use the tracing subscriber `Registry`, or any other subscriber
-    // that impls `LookupSpan`
+    // 使用跟踪订阅者 `Registry`，或任何其他实现 `LookupSpan` 的订阅者
     tracing_subscriber::registry()
         .with(opentelemetry)
         .with(filter)

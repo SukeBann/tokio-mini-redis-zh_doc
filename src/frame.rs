@@ -1,5 +1,4 @@
-//! Provides a type representing a Redis protocol frame as well as utilities for
-//! parsing frames from a byte array.
+//! 提供一个表示 Redis 协议帧的类型以及用于从字节数组解析帧的工具。
 
 use bytes::{Buf, Bytes};
 use std::convert::TryInto;
@@ -8,7 +7,7 @@ use std::io::Cursor;
 use std::num::TryFromIntError;
 use std::string::FromUtf8Error;
 
-/// A frame in the Redis protocol.
+/// Redis 协议中的一个帧。
 #[derive(Clone, Debug)]
 pub enum Frame {
     Simple(String),
@@ -21,24 +20,24 @@ pub enum Frame {
 
 #[derive(Debug)]
 pub enum Error {
-    /// Not enough data is available to parse a message
+    /// 没有足够的数据来解析消息
     Incomplete,
 
-    /// Invalid message encoding
+    /// 无效的消息编码
     Other(crate::Error),
 }
 
 impl Frame {
-    /// Returns an empty array
+    /// 返回一个空数组
     pub(crate) fn array() -> Frame {
         Frame::Array(vec![])
     }
 
-    /// Push a "bulk" frame into the array. `self` must be an Array frame.
+    /// 将一个 "bulk" 帧推入数组。`self` 必须是一个数组帧。
     ///
-    /// # Panics
+    /// # Panic
     ///
-    /// panics if `self` is not an array
+    /// 当 `self` 不是数组时会触发panic
     pub(crate) fn push_bulk(&mut self, bytes: Bytes) {
         match self {
             Frame::Array(vec) => {
@@ -48,11 +47,11 @@ impl Frame {
         }
     }
 
-    /// Push an "integer" frame into the array. `self` must be an Array frame.
+    /// 将一个 "integer" 帧推入数组。`self` 必须是一个数组帧。
     ///
-    /// # Panics
+    /// # Panic
     ///
-    /// panics if `self` is not an array
+    /// 当 `self` 不是数组时会触发panic
     pub(crate) fn push_int(&mut self, value: u64) {
         match self {
             Frame::Array(vec) => {
@@ -62,7 +61,7 @@ impl Frame {
         }
     }
 
-    /// Checks if an entire message can be decoded from `src`
+    /// 检查是否可以从 `src` 解码出完整的消息
     pub fn check(src: &mut Cursor<&[u8]>) -> Result<(), Error> {
         match get_u8(src)? {
             b'+' => {
@@ -82,10 +81,10 @@ impl Frame {
                     // Skip '-1\r\n'
                     skip(src, 4)
                 } else {
-                    // Read the bulk string
+                    // 读取批量字符串
                     let len: usize = get_decimal(src)?.try_into()?;
 
-                    // skip that number of bytes + 2 (\r\n).
+                    // 跳过该数量的字节 + 2 (\r\n)。
                     skip(src, len + 2)
                 }
             }
@@ -101,24 +100,24 @@ impl Frame {
             actual => Err(format!("protocol error; invalid frame type byte `{}`", actual).into()),
         }
     }
-
-    /// The message has already been validated with `check`.
+    
+    /// 此消息已通过 `check` 验证。
     pub fn parse(src: &mut Cursor<&[u8]>) -> Result<Frame, Error> {
         match get_u8(src)? {
             b'+' => {
-                // Read the line and convert it to `Vec<u8>`
+                // 读取行并转换为 `Vec<u8>`
                 let line = get_line(src)?.to_vec();
 
-                // Convert the line to a String
+                // 将该行转换为字符串
                 let string = String::from_utf8(line)?;
 
                 Ok(Frame::Simple(string))
             }
             b'-' => {
-                // Read the line and convert it to `Vec<u8>`
+                // 读取行并转换为 `Vec<u8>`
                 let line = get_line(src)?.to_vec();
 
-                // Convert the line to a String
+                // 将该行转换为字符串
                 let string = String::from_utf8(line)?;
 
                 Ok(Frame::Error(string))
@@ -137,7 +136,7 @@ impl Frame {
 
                     Ok(Frame::Null)
                 } else {
-                    // Read the bulk string
+                    // 读取批量字符串
                     let len = get_decimal(src)?.try_into()?;
                     let n = len + 2;
 
@@ -147,7 +146,7 @@ impl Frame {
 
                     let data = Bytes::copy_from_slice(&src.chunk()[..len]);
 
-                    // skip that number of bytes + 2 (\r\n).
+                    // 跳过该数量的字节 + 2 (\r\n)。
                     skip(src, n)?;
 
                     Ok(Frame::Bulk(data))
@@ -166,8 +165,8 @@ impl Frame {
             _ => unimplemented!(),
         }
     }
-
-    /// Converts the frame to an "unexpected frame" error
+    
+    /// 将帧转换为“意外帧”错误
     pub(crate) fn to_error(&self) -> crate::Error {
         format!("unexpected frame: {}", self).into()
     }
@@ -199,7 +198,7 @@ impl fmt::Display for Frame {
             Frame::Array(parts) => {
                 for (i, part) in parts.iter().enumerate() {
                     if i > 0 {
-                        // use space as the array element display separator
+                        // 使用空格作为数组元素的显示分隔符
                         write!(fmt, " ")?;
                     }
 

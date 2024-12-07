@@ -1,7 +1,7 @@
-//! Minimal Redis server implementation
+//! 最小化 Redis 服务器实现
 //!
-//! Provides an async `run` function that listens for inbound connections,
-//! spawning a task per connection.
+//! 提供一个异步 `run` 函数，监听传入的连接，
+//! 每个连接生成一个任务。
 
 use crate::{Command, Connection, Db, DbDropGuard, Shutdown};
 
@@ -12,124 +12,95 @@ use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::time::{self, Duration};
 use tracing::{debug, error, info, instrument};
 
-/// Server listener state. Created in the `run` call. It includes a `run` method
-/// which performs the TCP listening and initialization of per-connection state.
+/// 服务器侦听器状态。在 `run` 调用中创建。它包括一个执行 TCP 监听和初始化每个连接状态的 `run` 方法。
 #[derive(Debug)]
 struct Listener {
-    /// Shared database handle.
+    /// 共享的数据库句柄。
     ///
-    /// Contains the key / value store as well as the broadcast channels for
-    /// pub/sub.
+    /// 包含键/值存储以及用于 pub/sub 的广播通道。
     ///
-    /// This holds a wrapper around an `Arc`. The internal `Db` can be
-    /// retrieved and passed into the per connection state (`Handler`).
+    /// 这里包含了一个 `Arc` 的包装器。内部的 `Db` 可以被检索并传入每个连接状态 (`Handler`)。
     db_holder: DbDropGuard,
 
-    /// TCP listener supplied by the `run` caller.
+    /// 由 `run` 调用者提供的 TCP 侦听器。
     listener: TcpListener,
 
-    /// Limit the max number of connections.
+    /// 限制最大连接数量。
     ///
-    /// A `Semaphore` is used to limit the max number of connections. Before
-    /// attempting to accept a new connection, a permit is acquired from the
-    /// semaphore. If none are available, the listener waits for one.
+    /// 使用 `Semaphore` 来限制最大连接数量。在尝试接受新连接之前，
     ///
-    /// When handlers complete processing a connection, the permit is returned
-    /// to the semaphore.
+    /// 当处理程序完成处理一个连接时，许可证会被返回到信号量。
     limit_connections: Arc<Semaphore>,
 
-    /// Broadcasts a shutdown signal to all active connections.
+    /// 向所有活动连接广播关闭信号。
     ///
-    /// The initial `shutdown` trigger is provided by the `run` caller. The
-    /// server is responsible for gracefully shutting down active connections.
-    /// When a connection task is spawned, it is passed a broadcast receiver
-    /// handle. When a graceful shutdown is initiated, a `()` value is sent via
-    /// the broadcast::Sender. Each active connection receives it, reaches a
-    /// safe terminal state, and completes the task.
+    /// 初始的 `shutdown` 触发器由 `run` 调用者提供。服务器负责优雅地关闭活动连接。
+    /// 当一个连接任务被生成时，它会传递一个广播接收器句柄。
+    /// 当启动优雅关闭时，会通过 broadcast::Sender 发送一个 `()` 值。
+    /// 每个活动连接接收到信号后，达到一个安全的终端状态，并完成任务。
     notify_shutdown: broadcast::Sender<()>,
 
-    /// Used as part of the graceful shutdown process to wait for client
-    /// connections to complete processing.
+    /// 用作优雅关闭过程的一部分，等待客户端连接完成处理。
     ///
-    /// Tokio channels are closed once all `Sender` handles go out of scope.
-    /// When a channel is closed, the receiver receives `None`. This is
-    /// leveraged to detect all connection handlers completing. When a
-    /// connection handler is initialized, it is assigned a clone of
-    /// `shutdown_complete_tx`. When the listener shuts down, it drops the
-    /// sender held by this `shutdown_complete_tx` field. Once all handler tasks
-    /// complete, all clones of the `Sender` are also dropped. This results in
-    /// `shutdown_complete_rx.recv()` completing with `None`. At this point, it
-    /// is safe to exit the server process.
+    /// 一旦所有 `Sender` 句柄超出范围，Tokio 通道就会关闭。
+    /// 当通道关闭时，接收器会接收到 `None`。这用于检测所有连接处理程序是否完成。
+    /// 当一个连接处理程序被初始化时，它被分配一个 `shutdown_complete_tx` 的克隆。
+    /// 当侦听器关闭时，它会丢弃由此 `shutdown_complete_tx` 字段持有的发送器。
+    /// 一旦所有处理程序任务完成，所有 `Sender` 的克隆也会被丢弃。
+    /// 这导致 `shutdown_complete_rx.recv()` 以 `None` 完成。
+    /// 此时，可以安全地退出服务器进程。
     shutdown_complete_tx: mpsc::Sender<()>,
 }
 
-/// Per-connection handler. Reads requests from `connection` and applies the
-/// commands to `db`.
+/// 每个连接的处理程序。从 `connection` 读取请求并将指令应用于 `db`。
 #[derive(Debug)]
 struct Handler {
-    /// Shared database handle.
+    /// 共享的数据库句柄。
     ///
-    /// When a command is received from `connection`, it is applied with `db`.
-    /// The implementation of the command is in the `cmd` module. Each command
-    /// will need to interact with `db` in order to complete the work.
+    /// 当从 `connection` 接收到命令时，它将与 `db` 一起应用。
+    /// 与 `db` 交互以完成工作。
     db: Db,
 
-    /// The TCP connection decorated with the redis protocol encoder / decoder
-    /// implemented using a buffered `TcpStream`.
-    ///
-    /// When `Listener` receives an inbound connection, the `TcpStream` is
-    /// passed to `Connection::new`, which initializes the associated buffers.
-    /// `Connection` allows the handler to operate at the "frame" level and keep
+    /// 使用带缓冲的 `TcpStream` 实现的 redis 协议编码器/解码器装饰的 TCP 连接。
+    /// 在"帧"级别上操作，并将字节级协议解析细节封装在 `Connection` 中。
     /// the byte level protocol parsing details encapsulated in `Connection`.
     connection: Connection,
 
-    /// Listen for shutdown notifications.
+    /// 监听关闭通知。
     ///
-    /// A wrapper around the `broadcast::Receiver` paired with the sender in
-    /// `Listener`. The connection handler processes requests from the
-    /// connection until the peer disconnects **or** a shutdown notification is
-    /// received from `shutdown`. In the latter case, any in-flight work being
-    /// processed for the peer is continued until it reaches a safe state, at
-    /// which point the connection is terminated.
+    /// 这是对于 `Listener` 中的发送器配对的 `broadcast::Receiver` 的包装。
+    /// 连接处理程序处理来自连接的请求，直到对等方断开连接 **或** 从 `shutdown` 收到关闭通知。
+    /// 在后一种情况下，任何正在进行的工作都会继续，直到到达一个安全状态，
+    /// 此时连接才会终止。
     shutdown: Shutdown,
 
-    /// Not used directly. Instead, when `Handler` is dropped...?
+    /// 不直接使用。相反，当 `Handler` 被丢弃时...？
     _shutdown_complete: mpsc::Sender<()>,
 }
 
-/// Maximum number of concurrent connections the redis server will accept.
+/// Redis 服务器可接受的最大并发连接数。
 ///
-/// When this limit is reached, the server will stop accepting connections until
-/// an active connection terminates.
-///
-/// A real application will want to make this value configurable, but for this
-/// example, it is hard coded.
-///
-/// This is also set to a pretty low value to discourage using this in
-/// production (you'd think that all the disclaimers would make it obvious that
-/// this is not a serious project... but I thought that about mini-http as
+/// 当达到此限制时，服务器将停止接受连接，直到有活动连接终止。
+/// 是一样的)。
 /// well).
 const MAX_CONNECTIONS: usize = 250;
 
-/// Run the mini-redis server.
+/// 运行 mini-redis 服务器。
 ///
-/// Accepts connections from the supplied listener. For each inbound connection,
-/// a task is spawned to handle that connection. The server runs until the
-/// `shutdown` future completes, at which point the server shuts down
-/// gracefully.
+/// 接受来自提供的侦听器的连接。对于每个传入的连接，
+/// 生成一个任务来处理该连接。服务器一直运行到
+/// `shutdown` future 完成，此时服务器将优雅地关闭。
 ///
-/// `tokio::signal::ctrl_c()` can be used as the `shutdown` argument. This will
-/// listen for a SIGINT signal.
+/// 可以将 `tokio::signal::ctrl_c()` 用作 `shutdown` 参数。
+/// 这将监听 SIGINT 信号。
 pub async fn run(listener: TcpListener, shutdown: impl Future) {
-    // When the provided `shutdown` future completes, we must send a shutdown
-    // message to all active connections. We use a broadcast channel for this
-    // purpose. The call below ignores the receiver of the broadcast pair, and when
-    // a receiver is needed, the subscribe() method on the sender is used to create
-    // one.
+    // 当提供的 `shutdown` future 完成时，我们必须向所有活动连接发送关闭消息。
+    // 我们使用广播通道来实现这一目的。下面的调用忽略了广播对的接收器，当需要接收器时，
+    // 使用发送器上的 subscribe() 方法来创建一个。
     let (notify_shutdown, _) = broadcast::channel(1);
     let (shutdown_complete_tx, mut shutdown_complete_rx) = mpsc::channel(1);
 
-    // Initialize the listener state
+    // 初始化监听器状态
     let mut server = Listener {
         listener,
         db_holder: DbDropGuard::new(),
@@ -138,93 +109,79 @@ pub async fn run(listener: TcpListener, shutdown: impl Future) {
         shutdown_complete_tx,
     };
 
-    // Concurrently run the server and listen for the `shutdown` signal. The
-    // server task runs until an error is encountered, so under normal
-    // circumstances, this `select!` statement runs until the `shutdown` signal
-    // is received.
+    // 并发运行服务器并监听 `shutdown` 信号。
+    // 服务器任务运行到遇到错误为止，因此在正常情况下，
+    // 此 `select!` 语句运行到接收到 `shutdown` 信号。
     //
-    // `select!` statements are written in the form of:
+    // `select!` 语句的编写格式为：
     //
     // ```
-    // <result of async op> = <async op> => <step to perform with result>
+    // <异步操作的结果> = <异步操作> => <使用结果进行的步骤>
     // ```
     //
-    // All `<async op>` statements are executed concurrently. Once the **first**
-    // op completes, its associated `<step to perform with result>` is
-    // performed.
+    // 所有 `<异步操作>` 语句异步执行。
+    // 一旦 **第一个** 操作完成，它的关联 `<使用结果进行的步骤>` 会被执行。
     //
-    // The `select!` macro is a foundational building block for writing
-    // asynchronous Rust. See the API docs for more details:
+    // `select!` 宏是编写异步 Rust 的基础构建块。查看 API 文档了解更多详情：
     //
     // https://docs.rs/tokio/*/tokio/macro.select.html
     tokio::select! {
         res = server.run() => {
-            // If an error is received here, accepting connections from the TCP
-            // listener failed multiple times and the server is giving up and
-            // shutting down.
+            // 如果在这里收到错误，则表示接受 TCP 侦听器的连接失败多次，服务器放弃并关闭。
             //
-            // Errors encountered when handling individual connections do not
-            // bubble up to this point.
+            // 在处理单个连接时遇到的错误不会浮出到此点。
             if let Err(err) = res {
                 error!(cause = %err, "failed to accept");
             }
         }
         _ = shutdown => {
-            // The shutdown signal has been received.
+            // 已收到关闭信号。
             info!("shutting down");
         }
     }
 
-    // Extract the `shutdown_complete` receiver and transmitter
-    // explicitly drop `shutdown_transmitter`. This is important, as the
-    // `.await` below would otherwise never complete.
+    // 提取 `shutdown_complete` 接收器和传输器
+    // 显式删除 `shutdown_transmitter`。这很重要，否则下面的 `.await` 将永远不会完成。
     let Listener {
         shutdown_complete_tx,
         notify_shutdown,
         ..
     } = server;
 
-    // When `notify_shutdown` is dropped, all tasks which have `subscribe`d will
-    // receive the shutdown signal and can exit
+    // 当 `notify_shutdown` 被丢弃时，所有调用过 `subscribe` 的任务将会接收到关闭信号并退出
     drop(notify_shutdown);
-    // Drop final `Sender` so the `Receiver` below can complete
+    // Drop最后的 `Sender` 以便下面的 `Receiver` 可以完成
     drop(shutdown_complete_tx);
 
-    // Wait for all active connections to finish processing. As the `Sender`
-    // handle held by the listener has been dropped above, the only remaining
-    // `Sender` instances are held by connection handler tasks. When those drop,
-    // the `mpsc` channel will close and `recv()` will return `None`.
+    // 等待所有活动连接完成处理。
+    // 由于监听器持有的 `Sender` 已经在上面被删除，
+    // 唯一剩下的 `Sender` 实例在连接处理器任务中持有。
+    // 当这些任务完成时，`mpsc` 通道将关闭，`recv()` 将返回 `None`。
     let _ = shutdown_complete_rx.recv().await;
 }
 
 impl Listener {
-    /// Run the server
+    /// 运行服务器
     ///
-    /// Listen for inbound connections. For each inbound connection, spawn a
-    /// task to process that connection.
+    /// 监听传入的连接。对于每个传入的连接，生成一个任务来处理该连接。
     ///
-    /// # Errors
+    /// # 错误
     ///
-    /// Returns `Err` if accepting returns an error. This can happen for a
-    /// number reasons that resolve over time. For example, if the underlying
-    /// operating system has reached an internal limit for max number of
-    /// sockets, accept will fail.
+    /// 如果接受连接时返回错误，则返回 `Err`。这可能由于各种原因而发生，这些原因可以随着时间的推移解决。
+    /// 例如，如果底层操作系统达到了最大套接字数量的内部限制，accept 调用将会失败。
     ///
-    /// The process is not able to detect when a transient error resolves
-    /// itself. One strategy for handling this is to implement a back off
-    /// strategy, which is what we do here.
+    /// 无法检测到短暂错误何时自行解决。一种处理这种情况的策略是实现退避策略，我们在这里实现这种策略。
     async fn run(&mut self) -> crate::Result<()> {
         info!("accepting inbound connections");
 
         loop {
-            // Wait for a permit to become available
+            // 等待许可证可用
             //
-            // `acquire_owned` returns a permit that is bound to the semaphore.
-            // When the permit value is dropped, it is automatically returned
-            // to the semaphore.
+            // `acquire_owned` 返回一个与信号量绑定的许可证。
+            // 当许可证值被丢弃时，它会自动返回到信号量。
             //
-            // `acquire_owned()` returns `Err` when the semaphore has been
-            // closed. We don't ever close the semaphore, so `unwrap()` is safe.
+            // 当信号量已关闭时，`acquire_owned()` 会返回 `Err`。
+            // 我们从不关闭信号量，所以 `unwrap()` 是安全的。
             let permit = self
                 .limit_connections
                 .clone()
@@ -232,135 +189,112 @@ impl Listener {
                 .await
                 .unwrap();
 
-            // Accept a new socket. This will attempt to perform error handling.
-            // The `accept` method internally attempts to recover errors, so an
-            // error here is non-recoverable.
+            // 接受一个新的套接字。这将尝试执行错误处理。
+            // `accept` 方法在内部尝试恢复错误，因此此处的错误是不可恢复的。
             let socket = self.accept().await?;
 
-            // Create the necessary per-connection handler state.
+            // 创建每个连接所需的处理状态。
             let mut handler = Handler {
-                // Get a handle to the shared database.
+                // 获取一个共享数据库的句柄。
                 db: self.db_holder.db(),
 
-                // Initialize the connection state. This allocates read/write
-                // buffers to perform redis protocol frame parsing.
+                // 初始化连接状态。这将分配读/写缓冲区以执行 redis 协议帧解析。
                 connection: Connection::new(socket),
 
-                // Receive shutdown notifications.
+                // 接收关闭通知。
                 shutdown: Shutdown::new(self.notify_shutdown.subscribe()),
 
-                // Notifies the receiver half once all clones are
-                // dropped.
+                // 一旦所有克隆被丢弃后通知接收方。
                 _shutdown_complete: self.shutdown_complete_tx.clone(),
             };
 
-            // Spawn a new task to process the connections. Tokio tasks are like
-            // asynchronous green threads and are executed concurrently.
+            // 生成一个新任务来处理连接。Tokio 任务类似于异步绿线程，并发执行。
             tokio::spawn(async move {
-                // Process the connection. If an error is encountered, log it.
+                // 处理连接。如果遇到错误，记录错误。
                 if let Err(err) = handler.run().await {
                     error!(cause = ?err, "connection error");
                 }
-                // Move the permit into the task and drop it after completion.
-                // This returns the permit back to the semaphore.
+                // 将许可证移入任务，并在完成后将其丢弃。这会将许可证返回到信号量。
                 drop(permit);
             });
         }
     }
-
-    /// Accept an inbound connection.
+    /// 接受一个传入的连接。
     ///
-    /// Errors are handled by backing off and retrying. An exponential backoff
-    /// strategy is used. After the first failure, the task waits for 1 second.
-    /// After the second failure, the task waits for 2 seconds. Each subsequent
-    /// failure doubles the wait time. If accepting fails on the 6th try after
-    /// waiting for 64 seconds, then this function returns with an error.
+    /// 通过退避重试来处理错误。使用指数退避策略。在第一次失败后，任务等待1秒。
+    /// 第二次失败后，任务等待2秒。每次后续失败都会使等待时间加倍。
+    /// 如果在等待64秒后第6次尝试接受失败，则此函数将返回一个错误。
     async fn accept(&mut self) -> crate::Result<TcpStream> {
         let mut backoff = 1;
 
-        // Try to accept a few times
+        // 尝试接受几次
         loop {
-            // Perform the accept operation. If a socket is successfully
-            // accepted, return it. Otherwise, save the error.
+            // 执行接受操作。如果成功接受了一个套接字，则返回它。否则，保存错误。
             match self.listener.accept().await {
                 Ok((socket, _)) => return Ok(socket),
                 Err(err) => {
                     if backoff > 64 {
-                        // Accept has failed too many times. Return the error.
+                        // 接受操作失败太多次。返回错误。
                         return Err(err.into());
                     }
                 }
             }
 
-            // Pause execution until the back off period elapses.
+            // 暂停执行直到退避期结束。
             time::sleep(Duration::from_secs(backoff)).await;
 
-            // Double the back off
+            // 将退避时间加倍
             backoff *= 2;
         }
     }
 }
-
 impl Handler {
-    /// Process a single connection.
+    /// 处理单个连接。
     ///
-    /// Request frames are read from the socket and processed. Responses are
-    /// written back to the socket.
+    /// 请求帧从套接字读取并处理。响应将写回到套接字。
     ///
-    /// Currently, pipelining is not implemented. Pipelining is the ability to
-    /// process more than one request concurrently per connection without
-    /// interleaving frames. See for more details:
-    /// https://redis.io/topics/pipelining
+    /// 目前，流水线尚未实现。流水线是指能够在每个连接上并发处理多个请求而不交错帧。
+    /// 更多详情参见：https://redis.io/topics/pipelining
     ///
-    /// When the shutdown signal is received, the connection is processed until
-    /// it reaches a safe state, at which point it is terminated.
+    /// 当接收到关闭信号时，连接会处理到达安全状态，之后进行终止。
     #[instrument(skip(self))]
     async fn run(&mut self) -> crate::Result<()> {
-        // As long as the shutdown signal has not been received, try to read a
-        // new request frame.
+        // 只要没有收到关闭信号，就尝试读取一个新的请求帧。
         while !self.shutdown.is_shutdown() {
-            // While reading a request frame, also listen for the shutdown
-            // signal.
+            // 在读取请求帧的同时也监听关闭信号。
             let maybe_frame = tokio::select! {
                 res = self.connection.read_frame() => res?,
                 _ = self.shutdown.recv() => {
-                    // If a shutdown signal is received, return from `run`.
-                    // This will result in the task terminating.
+                    // 如果收到关闭信号，从 `run` 返回。
+                    // 这将导致任务终止。
                     return Ok(());
                 }
             };
 
-            // If `None` is returned from `read_frame()` then the peer closed
-            // the socket. There is no further work to do and the task can be
-            // terminated.
+            // 如果 `read_frame()` 返回 `None`，则表示对等方关闭了套接字。
+            // 没有进一步的工作要做，任务可以被终止。
             let frame = match maybe_frame {
                 Some(frame) => frame,
                 None => return Ok(()),
             };
 
-            // Convert the redis frame into a command struct. This returns an
-            // error if the frame is not a valid redis command or it is an
-            // unsupported command.
+            // 将 redis 帧转换为命令结构体。如果帧不是有效的 redis 命令或不支持的命令，则返回错误。
             let cmd = Command::from_frame(frame)?;
 
-            // Logs the `cmd` object. The syntax here is a shorthand provided by
-            // the `tracing` crate. It can be thought of as similar to:
+            // 记录 `cmd` 对象。这里的语法是由 `tracing` crate 提供的简写。
+            // 它可以被认为类似于：
             //
             // ```
             // debug!(cmd = format!("{:?}", cmd));
             // ```
             //
-            // `tracing` provides structured logging, so information is "logged"
-            // as key-value pairs.
+            // `tracing` 提供结构化日志记录，因此信息以键值对的形式“记录”。
             debug!(?cmd);
 
-            // Perform the work needed to apply the command. This may mutate the
-            // database state as a result.
+            // 执行应用命令所需的工作。这可能会导致数据库状态的变化。
             //
-            // The connection is passed into the apply function which allows the
-            // command to write response frames directly to the connection. In
-            // the case of pub/sub, multiple frames may be send back to the
-            // peer.
+            // 连接被传递到 apply 函数中，这允许命令直接将响应帧写入连接。
+            // 在发布/订阅的情况下，可能会有多个帧发送回对等方。
             cmd.apply(&self.db, &mut self.connection, &mut self.shutdown)
                 .await?;
         }
